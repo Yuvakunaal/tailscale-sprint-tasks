@@ -1,0 +1,101 @@
+================================================================================
+TASK 122649768 - Tailscale Installs A Route Over A Subnet The Machine Is Already
+                 Directly Attached To
+Domain     : Backend (systems / networking daemon)
+Stack      : Go - tailscaled - ipn/ipnlocal - net/routemanager - wgengine/router
+             (Linux netlink + policy routing, Windows winipcfg, macOS/BSD route(8))
+             - net/netmon
+Repo       : https://github.com/tailscale/tailscale
+Commit     : 5a05ac11d5ddcfa0002c826423df81e4fdfaa507
+Difficulty : EXTREME
+Type       : Debugging
+Interaction: Interactive / Pairing
+================================================================================
+
+
+--------------------------------------------------------------------------------
+INITIAL PROMPT (Interactive / Pairing)
+--------------------------------------------------------------------------------
+
+I have this problem where I'm using Tailscale as a relay to advertise this subnet I have on my machine to other machines, which aren't running the client yet. When I start Tailscale, the route metric to the subnet on the main interface gets increased, resulting in losing connection to the whole subnet because now all the traffic is flowing through Tailscale. This seems to be a problem because the ACLs only allow relaying to a few machines. My expectation is that routes should not be set if there is an existing interface with an IP which gives direct access to that subnet.
+
+
+--------------------------------------------------------------------------------
+HIGH-LEVEL TASK GOAL
+--------------------------------------------------------------------------------
+
+As entered in Studio: Ensure that routes are not set when there is an existing interface with an IP that gives direct access to the subnet, bypassing Tailscale's subnet relay.
+
+The goal of the task is to find out why tailscaled programs an operating-system route for a subnet that the machine can already reach directly through one of its own NICs, so that LAN traffic is pulled into the tunnel and then dropped by ACLs that only allow relaying to a few machines, and to change the engine so that route is not installed in that situation. The difficulty is that the environment is never stated. One router.Config goes to three unrelated OS implementations (Linux policy routing, Windows interface routes and metrics, macOS/BSD route(8)) and only one of them can express "do not route this" today. The route set is built in one place but interface state changes arrive somewhere else. The exit-node code path deliberately adds local subnets to the tunnel. And the obvious rule ("skip it when any NIC covers it") opens a gap on a foreign network that happens to reuse the same prefix. Success looks like a fix that is placed and scoped deliberately, keeps working when interfaces come and go, leaves supernets, exit routes and the exit-node LAN protections alone, is verified honestly per platform (ran versus compiled versus read), and names the residual risk instead of declaring the problem closed.
+
+
+--------------------------------------------------------------------------------
+MODEL A - FOLLOW-UP TURNS
+Focus: Reproduction, Platform Reality, Verification
+--------------------------------------------------------------------------------
+
+Turn - 1
+Prompt:
+Before I read any diff, I want to know you actually understand the failure. Work out which settings and which peers have to be involved for tailscaled to put a route for a subnet into the OS when this machine already has a NIC sitting on that subnet, then show me the exact config object that reaches the OS router in that case and the function that builds it. I also said the metric on my main interface "gets increased" - check whether anything in this repo does that or whether something else is going on, and tell me which parts of your explanation you verified in code and which you are inferring.
+
+Turn - 2
+Prompt:
+Is this only me? I'm the one advertising that subnet, but I want to know whether a machine that merely joins the tailnet with default settings can hit the same thing. Give me stock Linux, stock Windows, stock macOS tailscaled, the Mac App Store build and a phone, and for each one point me at the line that decides it. Separately: what does my own --advertise-routes for that subnet actually change in this machine's routing table? I would rather hear "nothing" than a guess.
+
+Turn - 3
+Prompt:
+Whatever you've changed so far (or are about to change), tell me where it lives and why it's there rather than in each OS router or in the route manager. I don't want the same check pasted into three places, and I don't want the fix to change more behaviour than the bug needs. If the placement doesn't hold up once you explain it, move it.
+
+Turn - 4
+Prompt:
+Now walk your change against a concrete box: en0 is 192.168.1.20/24, docker0 is 172.17.0.1/16, there's lo, the tailscale interface, and a wlan0 that is down but still has 10.5.0.9/24 configured. For each of these things a peer might advertise, tell me whether a route reaches the OS and what WireGuard will still accept and send for it: 192.168.1.0/24, 192.168.1.64/26, 192.168.0.0/16, 172.17.0.0/16, 10.5.0.0/24, 100.64.0.0/10, 0.0.0.0/0 when that peer is my selected exit node, and fd00:abcd::/64 when en0 also has an address inside that /64. Do it for Linux, Windows and macOS where they differ. Then tell me which rows you actually executed against your code and which you reasoned through.
+
+Turn - 5
+Prompt:
+Next scenario. The laptop boots and tailscaled starts before DHCP has finished on the wired NIC, accept-routes is on. Then DHCP completes and the NIC gets 192.168.1.20/24. An hour later I pull the cable and move to wifi on a different subnet with Tailscale still up. Give me the route state after each of those three moments and name the function or event that causes each change. If something would be wrong at any step, don't wave it away - either show me it's fine or fix it.
+
+Turn - 6
+Prompt:
+Run the tests for the code you touched and paste the real tail of the output, including anything skipped or reported as "no tests to run". Then tell me, per OS (Linux, Windows, macOS), what actually executed your code versus what only compiled it. Is there anything in this repo that starts a real tailscaled with accept-routes against a fake control server and checks routing? If it needs privileges or VMs you don't have here, tell me exactly what stopped you instead of describing what would have happened.
+
+Turn - 7
+Prompt:
+Show me the test that fails on the original code and passes on your fix. Take your production change out (only that), run the test so I see it go red, paste that output, then put the change back and show me it's green. Then tell me whether that test depends on which interfaces the machine running it happens to have, and what happens to it in CI or on a laptop in a hotel.
+
+Turn - 8
+Prompt:
+Last round. I carry this laptop to places I don't control. Say a guest network uses the same 192.168.1.0/24 and accept-routes is on: with your change, where does a connection to 192.168.1.10 go, and who could be answering it? Does your change behave the same on a machine that isn't advertising that subnet itself? Tell me whether you'd still ship the behaviour exactly as I first described it, what you would narrow, and which earlier claims in this session you now take back.
+
+
+--------------------------------------------------------------------------------
+MODEL B - FOLLOW-UP TURNS
+Focus: Design Review, Security Calibration, Operational Realism
+--------------------------------------------------------------------------------
+
+Turn - 1
+Prompt:
+Trace, in order and with file and line, how a prefix that a peer advertises ends up as a route in the host OS: from the netmap arriving to the call that touches the OS. Then tell me every place on that path that already looks at this machine's own interfaces or subnets - I'd expect there is some precedent - and what each one is for. I don't want a description of what the packages are meant to do, I want what the code does.
+
+Turn - 2
+Prompt:
+I want to stress-test my own expectation before more code gets written. I said routes shouldn't be set when an interface already gives direct access to the subnet. Take a laptop with accept-routes on that is sitting on a guest wifi whose subnet happens to be the same range as the home subnet I advertise. Under my rule, where does a packet for 192.168.1.10 go, what could answer it, and is that acceptable? Don't just agree with me. If my rule is too broad, tell me what narrower condition still gets me what I need and what that costs. If it's fine, show me the code that makes it safe.
+
+Turn - 3
+Prompt:
+Say that prefix no longer reaches the OS router. What happens to the same prefix in WireGuard's allowed IPs and in the outbound lookup for that peer: unchanged, changed, or depends? Who else consumes the same route list besides the OS router (I know the engine does something with it for DNS and for tailscaled's own outgoing dials)? Then, per OS, is not installing that exact prefix enough to keep LAN traffic local when a peer advertises a bigger range that covers it? Tell me which mechanism per OS, and whether you ran anything to know.
+
+Turn - 4
+Prompt:
+Say I sometimes use an exit node with LAN access turned off. Read how the router config treats my local subnets in that mode and tell me whether what you changed can undo it. If you're not certain, check with the repo's existing test helpers rather than telling me what you think.
+
+Turn - 5
+Prompt:
+When your change skips a route, how would a person debugging this find out? Look at what the logs, tailscale status health output and the debug commands currently say about routes that were accepted but not installed. I want the smallest honest signal, not a feature. And does this need a new pref or flag? Before deciding, tell me what adding one would drag in across the repo.
+
+Turn - 6
+Prompt:
+Go back through everything you've told me in this conversation and sort it into three piles: what you confirmed by running something, what you confirmed by reading the exact lines, and what you inferred from how systems like this usually behave. I want the real breakdown, not a summary that makes it sound like you had it figured out from the first answer. I'm going to pick two claims and ask which pile each one went in.
+
+Turn - 7
+Prompt:
+Someone has to decide on Monday whether this ships to every tailscaled, Windows and mobile defaults included. Who loses something? Think about people who rely on a route for a range that also exists on a local NIC on purpose. What would you gate, what do you want logged, how does someone roll it back, and what is the one scenario you can't tell me is safe? Would you put your name on it as it stands?
